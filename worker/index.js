@@ -4,6 +4,39 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // =================【新加入的看门人逻辑开始】=================
+    // 1. 如果是加入房间的链接（含有 r= 参数），直接放行给聊天室原程序
+    if (url.searchParams.has('r')) {
+      // 🛑 注意：这里的 fetch(request) 代表放行。
+      // 如果你原本的代码最后用的是别的响应方式，请对照你原代码的放行方式
+      return fetch(request); 
+    }
+
+    // 2. 只对聊天室的首页（根目录）进行安全审查
+    if (url.pathname === '/') {
+      const cookieHeader = request.headers.get('Cookie') || '';
+      
+      // 检查 A：URL 后面带着暗号
+      if (url.searchParams.get('create') === 'kamiko') {
+        const response = await fetch(request); // 这里换成你原本逻辑的入口
+        const newResponse = new Response(response.body, response);
+        // 埋下 1 小时有效的通行证
+        newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
+        return newResponse;
+      }
+
+      // 检查 B：浏览器里已经有通行证（Cookie）了
+      if (cookieHeader.includes('chat_auth=kamiko')) {
+        return fetch(request); // 放行给聊天室原程序
+      }
+
+      // 如果既没有暗号，也没有通行证，拦截并返回 403
+      return new Response('Access Denied: Please use the correct creation link.', {
+        status: 403,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      });
+    }
+
     // 处理WebSocket请求
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader && upgradeHeader === 'websocket') {
