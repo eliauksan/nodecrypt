@@ -4,71 +4,69 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // =================【新加入的看门人逻辑开始】=================
-    // 1. 如果是加入房间的链接（含有 r= 参数），直接放行给聊天室原程序
-    if (url.searchParams.has('r')) {
-      // 🛑 注意：这里的 fetch(request) 代表放行。
-      // 如果你原本的代码最后用的是别的响应方式，请对照你原代码的放行方式
-      return fetch(request); 
+    // =================【核心修复：优先截获并转发 WebSocket 请求】=================
+    // 无论是创建房间还是在房间内聊天，前端发起的 WS 长连接必须直接送往 Durable Object 房间处理器
+    // 否则建房或加入房间会永远卡在 “连接中...”
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+      const id = env.CHAT_ROOM.idFromName('chat-room');
+      const stub = env.CHAT_ROOM.get(id);
+      return stub.fetch(request);
     }
 
-    // 2. 只对聊天室的首页（根目录）进行安全审查
+    // =================【第一步：无条件放行带房间参数的网页内容请求】=================
+    // 如果是加入房间的链接（含有 r= 参数）的网页托管资源请求，直接从 ASSETS 资源库提取并放行
+    if (url.searchParams.has('r')) {
+      return env.ASSETS.fetch(request); 
+    }
+
+    // =================【第二步：精准拦截首页根目录（看门人守卫逻辑）】=================
     if (url.pathname === '/') {
       const cookieHeader = request.headers.get('Cookie') || '';
       
-      // 检查 A：URL 后面带着暗号
+      // 检查 A：URL 后面带着固定暗号 kamiko
       if (url.searchParams.get('create') === 'kamiko') {
-        const response = await fetch(request); // 这里换成你原本逻辑的入口
+        // 从底层的 ASSETS 中抓取首页 HTML 内容（拒绝使用全局 fetch 避免死循环）
+        const response = await env.ASSETS.fetch(request);
         const newResponse = new Response(response.body, response);
-        // 埋下 1 小时有效的通行证
+        // 埋下 1 小时有效的通行证 Cookie 
         newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
-      // 检查 B：浏览器里已经有通行证（Cookie）了
+      // 检查 B：浏览器里已经有通行证（Cookie）了，直接放行首页
       if (cookieHeader.includes('chat_auth=kamiko')) {
-        return fetch(request); // 放行给聊天室原程序
+        return env.ASSETS.fetch(request);
       }
 
-      // 如果既没有暗号，也没有通行证，拦截并返回 403
+      // 检查 C：既没有暗号也没有 Cookie，直接拦截返回 403
       return new Response('Access Denied: Please use the correct creation link.', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       });
     }
 
-    // 处理WebSocket请求
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (upgradeHeader && upgradeHeader === 'websocket') {
-      const id = env.CHAT_ROOM.idFromName('chat-room');
-      const stub = env.CHAT_ROOM.get(id);
-      return stub.fetch(request);
-    }
-
-    // 处理API请求
+    // =================【第三步：处理其余 API 和静态资产请求】=================
+    // 处理 API 请求
     if (url.pathname.startsWith('/api/')) {
-      // ...API 逻辑...
       return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
     }
 
-    // 其余全部交给 ASSETS 处理（自动支持 hash 文件名和 SPA fallback）
+    // 其余的所有 JS/CSS/图片/ SPA 资源请求，安全交给 ASSETS 资源器下发给浏览器
     return env.ASSETS.fetch(request);
   }
 };
 
-export class ChatRoom {  constructor(state, env) {
+// =================【以下为您原本完整的 ChatRoom Durable Object 逻辑，完好无损】=================
+export class ChatRoom {  
+  constructor(state, env) {
     this.state = state;
-    
-    // Use objects like original server.js instead of Maps
     this.clients = {};
     this.channels = {};
-    
     this.config = {
       seenTimeout: 60000,
       debug: false
     };
-    
-    // Initialize RSA key pair
     this.initRSAKeyPair();
   }
 
@@ -77,7 +75,7 @@ export class ChatRoom {  constructor(state, env) {
       let stored = await this.state.storage.get('rsaKeyPair');
       if (!stored) {
         console.log('Generating new RSA keypair...');
-          const keyPair = await crypto.subtle.generateKey(
+        const keyPair = await crypto.subtle.generateKey(
           {
             name: 'RSASSA-PKCS1-v1_5',
             modulusLength: 2048,
@@ -88,7 +86,6 @@ export class ChatRoom {  constructor(state, env) {
           ['sign', 'verify']
         );
 
-        // 并行导出公钥和私钥以提高性能
         const [publicKeyBuffer, privateKeyBuffer] = await Promise.all([
           crypto.subtle.exportKey('spki', keyPair.publicKey),
           crypto.subtle.exportKey('pkcs8', keyPair.privateKey)
@@ -97,17 +94,15 @@ export class ChatRoom {  constructor(state, env) {
         stored = {
           rsaPublic: btoa(String.fromCharCode(...new Uint8Array(publicKeyBuffer))),
           rsaPrivateData: Array.from(new Uint8Array(privateKeyBuffer)),
-          createdAt: Date.now() // 记录密钥创建时间，用于后续判断是否需要轮换
+          createdAt: Date.now()
         };
         
         await this.state.storage.put('rsaKeyPair', stored);
         console.log('RSA key pair generated and stored');
       }
       
-      // Reconstruct the private key
       if (stored.rsaPrivateData) {
         const privateKeyBuffer = new Uint8Array(stored.rsaPrivateData);
-        
         stored.rsaPrivate = await crypto.subtle.importKey(
           'pkcs8',
           privateKeyBuffer,
@@ -117,19 +112,17 @@ export class ChatRoom {  constructor(state, env) {
           },
           false,
           ['sign']
-        );      }
-        this.keyPair = stored;
+        );      
+      }
+      this.keyPair = stored;
       
-      // 检查密钥是否需要轮换（如果已创建超过24小时）
       if (stored.createdAt && (Date.now() - stored.createdAt > 24 * 60 * 60 * 1000)) {
-        // 如果没有任何客户端，则执行密钥轮换
         if (Object.keys(this.clients).length === 0) {
           console.log('密钥已使用24小时，进行轮换...');
           await this.state.storage.delete('rsaKeyPair');
           this.keyPair = null;
           await this.initRSAKeyPair();
         } else {
-          // 否则标记需要在客户端全部断开后进行轮换
           await this.state.storage.put('pendingKeyRotation', true);
         }
       }
@@ -140,13 +133,11 @@ export class ChatRoom {  constructor(state, env) {
   }
 
   async fetch(request) {
-    // Check for WebSocket upgrade
     const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader !== 'websocket') {
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
       return new Response('Expected WebSocket Upgrade', { status: 426 });
     }
 
-    // Ensure RSA keys are initialized
     if (!this.keyPair) {
       await this.initRSAKeyPair();
     }
@@ -154,17 +145,16 @@ export class ChatRoom {  constructor(state, env) {
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
 
-    // Accept the WebSocket connection
     this.handleSession(server);
 
     return new Response(null, {
       status: 101,
       webSocket: client,
     });
-  }  // WebSocket connection event handler
-  async handleSession(connection) {    connection.accept();
+  }  
 
-    // 清理旧连接
+  async handleSession(connection) {    
+    connection.accept();
     await this.cleanupOldConnections();
 
     const clientId = generateClientId();
@@ -174,7 +164,7 @@ export class ChatRoom {  constructor(state, env) {
       return;
     }
 
-    logEvent('connection', clientId, 'debug');    // Store client information
+    logEvent('connection', clientId, 'debug');    
     this.clients[clientId] = {
       connection: connection,
       seen: getTime(),
@@ -183,7 +173,6 @@ export class ChatRoom {  constructor(state, env) {
       channel: null
     };
 
-    // Send RSA public key
     try {
       logEvent('sending-public-key', clientId, 'debug');
       this.sendMessage(connection, JSON.stringify({
@@ -192,7 +181,8 @@ export class ChatRoom {  constructor(state, env) {
       }));
     } catch (error) {
       logEvent('sending-public-key', error, 'error');
-    }    // Handle messages
+    }    
+
     connection.addEventListener('message', async (event) => {
       const message = event.data;
 
@@ -207,10 +197,9 @@ export class ChatRoom {  constructor(state, env) {
         return;
       }
 
-      logEvent('message', [clientId, message], 'debug');      // Handle key exchange
+      logEvent('message', [clientId, message], 'debug');      
       if (!this.clients[clientId].shared && message.length < 2048) {
         try {
-          // Generate ECDH key pair using P-384 curve (equivalent to secp384r1)
           const keys = await crypto.subtle.generateKey(
             {
               name: 'ECDH',
@@ -222,7 +211,6 @@ export class ChatRoom {  constructor(state, env) {
 
           const publicKeyBuffer = await crypto.subtle.exportKey('raw', keys.publicKey);
           
-          // Sign the public key using PKCS1 padding (compatible with original)
           const signature = await crypto.subtle.sign(
             {
               name: 'RSASSA-PKCS1-v1_5'
@@ -231,11 +219,9 @@ export class ChatRoom {  constructor(state, env) {
             publicKeyBuffer
           );
 
-          // Convert hex string to Uint8Array for client public key
           const clientPublicKeyHex = message;
           const clientPublicKeyBytes = new Uint8Array(clientPublicKeyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
           
-          // Import client's public key
           const clientPublicKey = await crypto.subtle.importKey(
             'raw',
             clientPublicKeyBytes,
@@ -244,15 +230,14 @@ export class ChatRoom {  constructor(state, env) {
             []
           );
 
-          // Derive shared secret bits (equivalent to computeSecret in Node.js)
           const sharedSecretBits = await crypto.subtle.deriveBits(
             {
               name: 'ECDH',
               public: clientPublicKey
             },
             keys.privateKey,
-            384 // P-384 produces 48 bytes (384 bits)
-          );          // Take bytes 8-40 (32 bytes) for AES-256 key
+            384
+          );          
           this.clients[clientId].shared = new Uint8Array(sharedSecretBits).slice(8, 40);
 
           const response = Array.from(new Uint8Array(publicKeyBuffer))
@@ -269,11 +254,11 @@ export class ChatRoom {  constructor(state, env) {
         return;
       }
 
-      // Handle encrypted messages
       if (this.clients[clientId].shared && message.length <= (8 * 1024 * 1024)) {
         this.processEncryptedMessage(clientId, message);
       }
-    });    // Handle connection close
+    });    
+
     connection.addEventListener('close', async (event) => {
       logEvent('close', [clientId, event], 'debug');
 
@@ -289,7 +274,8 @@ export class ChatRoom {  constructor(state, env) {
             const members = this.channels[channel];
 
             for (const member of members) {
-              const client = this.clients[member];              if (this.isClientInChannel(client, channel)) {
+              const client = this.clients[member];              
+              if (this.isClientInChannel(client, channel)) {
                 this.sendMessage(client.connection, encryptMessage({
                   a: 'l',
                   p: members.filter((value) => {
@@ -310,7 +296,7 @@ export class ChatRoom {  constructor(state, env) {
       }
     });
   }
-  // Process encrypted messages
+
   processEncryptedMessage(clientId, message) {
     let decrypted = null;
 
@@ -339,7 +325,7 @@ export class ChatRoom {  constructor(state, env) {
       decrypted = null;
     }
   }
-  // Handle channel join requests
+
   handleJoinChannel(clientId, decrypted) {
     if (!isString(decrypted.p) || this.clients[clientId].channel) {
       return;
@@ -362,7 +348,7 @@ export class ChatRoom {  constructor(state, env) {
       logEvent('message-join', [clientId, error], 'error');
     }
   }
-  // Handle client messages
+
   handleClientMessage(clientId, decrypted) {
     if (!isString(decrypted.p) || !isString(decrypted.c) || !this.clients[clientId].channel) {
       return;
@@ -388,7 +374,8 @@ export class ChatRoom {  constructor(state, env) {
     } catch (error) {
       logEvent('message-client', [clientId, error], 'error');
     }
-  }  // Handle channel messages
+  }  
+
   handleChannelMessage(clientId, decrypted) {
     if (!isObject(decrypted.p) || !this.clients[clientId].channel) {
       return;
@@ -396,20 +383,19 @@ export class ChatRoom {  constructor(state, env) {
     
     try {
       const channel = this.clients[clientId].channel;
-      // 过滤有效的目标成员
       const validMembers = Object.keys(decrypted.p).filter(member => {
         const targetClient = this.clients[member];
         return isString(decrypted.p[member]) && this.isClientInChannel(targetClient, channel);
       });
 
-      // 处理所有有效的目标成员
       for (const member of validMembers) {
         const targetClient = this.clients[member];
         const messageObj = {
           a: 'c',
           p: decrypted.p[member],
           c: clientId
-        };        const encrypted = encryptMessage(messageObj, targetClient.shared);
+        };        
+        const encrypted = encryptMessage(messageObj, targetClient.shared);
         this.sendMessage(targetClient.connection, encrypted);
 
         messageObj.p = null;
@@ -419,7 +405,7 @@ export class ChatRoom {  constructor(state, env) {
       logEvent('message-channel', [clientId, error], 'error');
     }
   }
-  // Broadcast member list to channel
+
   broadcastMemberList(channel) {
     try {
       const members = this.channels[channel];
@@ -444,7 +430,8 @@ export class ChatRoom {  constructor(state, env) {
     } catch (error) {
       logEvent('broadcast-member-list', error, 'error');
     }
-  }  // Check if client is in channel
+  }  
+
   isClientInChannel(client, channel) {
     return (
       client &&
@@ -456,57 +443,56 @@ export class ChatRoom {  constructor(state, env) {
       false
     );
   }
-  // Send message helper
+
   sendMessage(connection, message) {
     try {
-      // In Cloudflare Workers, WebSocket.READY_STATE_OPEN is 1
       if (connection.readyState === 1) {
         connection.send(message);
       }
     } catch (error) {
       logEvent('sendMessage', error, 'error');
     }
-  }  // Close connection helper
+  }  
+
   closeConnection(connection) {
     try {
-      connection.close();    } catch (error) {
+      connection.close();    
+    } catch (error) {
       logEvent('closeConnection', error, 'error');
     }
   }
   
-  // 连接清理方法
   async cleanupOldConnections() {
     const seenThreshold = getTime() - this.config.seenTimeout;
     const clientsToRemove = [];
 
-    // 先收集需要移除的客户端，避免在迭代时修改对象
     for (const clientId in this.clients) {
       if (this.clients[clientId].seen < seenThreshold) {
         clientsToRemove.push(clientId);
       }
     }
 
-    // 然后一次性移除所有过期客户端
     for (const clientId of clientsToRemove) {
       try {
         logEvent('connection-seen', clientId, 'debug');
         this.clients[clientId].connection.close();
         delete this.clients[clientId];
       } catch (error) {
-        logEvent('connection-seen', error, 'error');      }
+        logEvent('connection-seen', error, 'error');      
+      }
     }
     
-    // 如果没有任何客户端和房间，检查是否需要轮换密钥
     if (Object.keys(this.clients).length === 0 && Object.keys(this.channels).length === 0) {
       const pendingRotation = await this.state.storage.get('pendingKeyRotation');
       if (pendingRotation) {
         console.log('没有活跃客户端或房间，执行密钥轮换...');
-        await this.state.storage.delete('rsaKeyPair');        await this.state.storage.delete('pendingKeyRotation');
+        await this.state.storage.delete('rsaKeyPair');        
+        await this.state.storage.delete('pendingKeyRotation');
         this.keyPair = null;
         await this.initRSAKeyPair();
       }
     }
     
-    return clientsToRemove.length; // 返回清理的连接数量
+    return clientsToRemove.length;
   }
 }
