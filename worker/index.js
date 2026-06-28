@@ -30,12 +30,12 @@ export default {
         const response = await env.ASSETS.fetch(request);
         const newResponse = new Response(response.body, response);
         // 埋下 1 小时有效的通行证 Cookie 
-        newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
+        newResponse.headers.append('Set-Cookie', 'chat_auth=kid; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
       // 检查 B：浏览器里已经有通行证（Cookie）了，直接放行首页
-      if (cookieHeader.includes('chat_auth=kamiko')) {
+      if (cookieHeader.includes('chat_auth=kid')) {
         return env.ASSETS.fetch(request);
       }
 
