@@ -50,7 +50,7 @@ if (hasCookie) {
 }
 
 // 4. 检查 C：既不是暗号路径，又没有 Cookie，也不是静态资源 —— 统统拦截！
-return new Response('Access Denied: Please use the correct entry path.', {
+return new Response('Access Denied: Please use the correct entry path.（走开，这不是公益页，谢谢）', {
   status: 403,
   headers: { 'Content-Type': 'text/plain; charset=utf-8' }
 });
