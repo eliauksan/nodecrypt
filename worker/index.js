@@ -24,8 +24,8 @@ export default {
     if (url.pathname === '/') {
       const cookieHeader = request.headers.get('Cookie') || '';
       
-      // 检查 A：URL 后面带着固定暗号 kamiko
-      if (url.searchParams.get('create') === 'kamiko') {
+      // 检查 A：URL 后面带着固定暗号 
+      if (url.searchParams.get('create') === 'kid') {
         // 从底层的 ASSETS 中抓取首页 HTML 内容（拒绝使用全局 fetch 避免死循环）
         const response = await env.ASSETS.fetch(request);
         const newResponse = new Response(response.body, response);
