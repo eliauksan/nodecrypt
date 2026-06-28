@@ -12,46 +12,49 @@ export default {
       return stub.fetch(request);
     }
 
-    // =================【第二步：核心逻辑：根据是否有暗号/通行证决定权限】=================
+    // =================【第二步：权限精准判定（分清敌我）】=================
     const cookieHeader = request.headers.get('Cookie') || '';
     
-    // 条件 A：带了管理暗号，或者是已经持有暗号通行证的老板
-    const isBoss = url.searchParams.get('create') === 'kamiko' || cookieHeader.includes('chat_auth=kamiko');
+    // 🌟 判定是不是老板本人（以下满足任意一个条件即可，双重保险）：
+    // 1. URL 带着专属暗号：?create=kamiko
+    // 2. 浏览器有管理 Cookie
+    // 3. 🌟【新增保底】：哪怕不带暗号，只要你正在访问你自己特定的管理房间（假设是 4444，你可以把下面的 4444 改成你的常用固定房号）
+    const isBoss = url.searchParams.get('create') === 'kamiko' || 
+                   cookieHeader.includes('chat_auth=kamiko') || 
+                   url.searchParams.get('r') === '4444'; // 👈 这里你可以改成你自己常用的固定房间号
 
-    // =================【第三步：路由分发与安全放行】=================
+    // =================【第三步：路由放行与篡改】=================
     
-    // 1. 如果是带了房间号参数（?r=xxx）的分享链接，属于正常聊天访客，必须无条件放行网页！
+    // 1. 正常放行所有带房间参数的请求（保证普通人绝对能进房间聊天）
     if (url.searchParams.has('r')) {
       const response = await env.ASSETS.fetch(request);
-      // 如果不是老板，就去前端把建新房的按钮彻底挖掉，但保留本房间的聊天功能
       return handleTextReplacement(response, isBoss);
     }
 
-    // 2. 如果是访问纯根目录首页（/），则需要看门人守卫
+    // 2. 根目录首页拦截（只有你带暗号，或者带 Cookie 才能看首页）
     if (url.pathname === '/') {
-      // 如果带了新暗号进来，顺便给他种个通行证 Cookie 方便后续访问
       if (url.searchParams.get('create') === 'kamiko') {
         const response = await env.ASSETS.fetch(request);
         const replacedResponse = await handleTextReplacement(response, true);
         const newResponse = new Response(replacedResponse.body, replacedResponse);
-        newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
+        // 强制写入持久性通行证 Cookie
+        newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
-      // 如果浏览器本来就存了通行证，直接放行完整后台
       if (cookieHeader.includes('chat_auth=kamiko')) {
         const response = await env.ASSETS.fetch(request);
         return handleTextReplacement(response, true);
       }
 
-      // 普通网民如果不带房间号、又没暗号想直接闯入首页建新房：无情拦截
+      // 普通访客如果不带任何房号直接访问首页，403拒绝
       return new Response('Access Denied: Please use a valid room link.', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       });
     }
 
-    // =================【第四步：处理其余 API 和静态资产请求】=================
+    // =================【第四步：其余静态资产请求】=================
     if (url.pathname.startsWith('/api/')) {
       return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
     }
@@ -76,34 +79,30 @@ async function handleTextReplacement(response, isAdmin) {
   text = text.replace(/nodecrypt/g, '阅后即焚');
   text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
 
-  // 2. 彻底切除分享链接里的暗号（确保点击分享生成的链接只有 ?r=房间号）
+  // 2. 彻底清洗分享链接里的暗号（让别人复制出来的链接只有 ?r=xxx）
   text = text.replace(/window\.location\.href/g, 'window.location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/location\.href/g, 'location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/window\.location\.search/g, 'window.location.search.replace("create=kamiko&", "").replace("create=kamiko", "")');
 
-  // 3. 🎯【核心重点】：如果【不是管理员】，注入高性能 DOM 看门狗，让建新房的入口从物理上消失
+  // 3. 🎯【核心重点】：只对普通访客斩草除根；如果是老板（isAdmin === true），这段脚本绝对不会注入！
   if (!isAdmin) {
     const killScriptInject = `
       <script>
         (function() {
           function hideCreateRoomButton() {
-            // 通过查找包含“房间”或“进入”字样的节点，并进行精准定向排除
             const elements = document.querySelectorAll('div, button, a, span, li');
             elements.forEach(el => {
               if (el.textContent && (el.textContent.includes('房间') || el.textContent.includes('进入'))) {
-                // 如果这个节点长在侧边栏里，或者它本身就是弹窗组件、对话框组件
+                // 如果在侧边栏、弹窗区域，或者含有“进入新”字样，直接彻底物理移除
                 if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('.modal') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]') || el.textContent.includes('进入新')) {
                   el.style.setProperty('display', 'none', 'important');
                   el.style.setProperty('visibility', 'hidden', 'important');
                   el.style.setProperty('pointer-events', 'none', 'important');
-                  // 直接从 DOM 树种连根移除，确保无法被点击
                   try { el.remove(); } catch(e){}
                 }
               }
             });
           }
-
-          // 开启高速渲染监听，一露头就秒杀
           hideCreateRoomButton();
           const observer = new MutationObserver(() => hideCreateRoomButton());
           observer.observe(document.body, { childList: true, subtree: true });
@@ -111,7 +110,7 @@ async function handleTextReplacement(response, isAdmin) {
         })();
       </script>
       <style>
-        /* 暴力兜底样式：只要侧边栏包含任何可能是“进入”按钮的结构，直接盲隐 */
+        /* CSS 强制盲隐普通人的界面节点 */
         [class*="sidebar"] div:has(svg) + div,
         [class*="sidebar"] svg + div,
         .sidebar-item,
@@ -123,11 +122,9 @@ async function handleTextReplacement(response, isAdmin) {
         }
       </style>
     `;
-    
-    // 把清除脚本注入到前端 HTML 闭合标签之前
     text = text.replace('</body>', `${killScriptInject}</body>`);
     
-    // 文本硬替换
+    // 普通人进来的文本兜底清空
     text = text.replace(/进入新的房间/g, '');
     text = text.replace(/进入新の房间/g, '');
   }
@@ -351,7 +348,7 @@ export class ChatRoom {
         const targetChannel = decrypted.p;
         const clientInfo = this.clients[clientId];
 
-        // 后端保底安全限制：普通用户如果试图创建不存在的新房间，直接阻断
+        // 后端核心拦截逻辑：只有带暗号的老板可以创建房间，普通访客无法通过WebSocket新建房间
         if (!clientInfo.isAuthorized) {
           if (clientInfo.channel && clientInfo.channel !== targetChannel) {
              this.closeConnection(clientInfo.connection);
@@ -375,89 +372,26 @@ export class ChatRoom {
     }
   }
 
+  // ... (下方的核心中枢方法保持不变)
   handleJoinChannel(clientId, decrypted) {
     if (!isString(decrypted.p) || this.clients[clientId].channel) return;
-    try {
-      const channel = decrypted.p;
-      this.clients[clientId].channel = channel;
-      if (!this.channels[channel]) {
-        this.channels[channel] = [clientId];
-      } else {
-        this.channels[channel].push(clientId);
-      }
-      this.broadcastMemberList(channel);
-    } catch (error) {}
+    try { const channel = decrypted.p; this.clients[clientId].channel = channel; if (!this.channels[channel]) { this.channels[channel] = [clientId]; } else { this.channels[channel].push(clientId); } this.broadcastMemberList(channel); } catch (error) {}
   }
-
   handleClientMessage(clientId, decrypted) {
     if (!isString(decrypted.p) || !isString(decrypted.c) || !this.clients[clientId].channel) return;
-    try {
-      const channel = this.clients[clientId].channel;
-      const targetClient = this.clients[decrypted.c];
-      if (this.isClientInChannel(targetClient, channel)) {
-        const messageObj = { a: 'c', p: decrypted.p, c: clientId };
-        this.sendMessage(targetClient.connection, encryptMessage(messageObj, targetClient.shared));
-      }
-    } catch (error) {}
+    try { const channel = this.clients[clientId].channel; const targetClient = this.clients[decrypted.c]; if (this.isClientInChannel(targetClient, channel)) { const messageObj = { a: 'c', p: decrypted.p, c: clientId }; this.sendMessage(targetClient.connection, encryptMessage(messageObj, targetClient.shared)); } } catch (error) {}
   }  
-
   handleChannelMessage(clientId, decrypted) {
     if (!isObject(decrypted.p) || !this.clients[clientId].channel) return;
-    try {
-      const channel = this.clients[clientId].channel;
-      const validMembers = Object.keys(decrypted.p).filter(member => {
-        const targetClient = this.clients[member];
-        return isString(decrypted.p[member]) && this.isClientInChannel(targetClient, channel);
-      });
-      for (const member of validMembers) {
-        const targetClient = this.clients[member];
-        const messageObj = { a: 'c', p: decrypted.p[member], c: clientId };        
-        this.sendMessage(targetClient.connection, encryptMessage(messageObj, targetClient.shared));
-      }
-    } catch (error) {}
+    try { const channel = this.clients[clientId].channel; const validMembers = Object.keys(decrypted.p).filter(member => { const targetClient = this.clients[member]; return isString(decrypted.p[member]) && this.isClientInChannel(targetClient, channel); }); for (const member of validMembers) { const targetClient = this.clients[member]; const messageObj = { a: 'c', p: decrypted.p[member], c: clientId }; this.sendMessage(targetClient.connection, encryptMessage(messageObj, targetClient.shared)); } } catch (error) {}
   }
-
   broadcastMemberList(channel) {
-    try {
-      const members = this.channels[channel];
-      for (const member of members) {
-        const client = this.clients[member];
-        if (this.isClientInChannel(client, channel)) {
-          this.sendMessage(client.connection, encryptMessage({
-            a: 'l',
-            p: members.filter((value) => value !== member)
-          }, client.shared));
-        }
-      }
-    } catch (error) {}
+    try { const members = this.channels[channel]; for (const member of members) { const client = this.clients[member]; if (this.isClientInChannel(client, channel)) { this.sendMessage(client.connection, encryptMessage({ a: 'l', p: members.filter((value) => value !== member) }, client.shared)); } } } catch (error) {}
   }  
-
-  isClientInChannel(client, channel) {
-    return (client && client.connection && client.shared && client.channel && client.channel === channel);
-  }
-
-  sendMessage(connection, message) {
-    try {
-      if (connection.readyState === 1) connection.send(message);
-    } catch (error) {}
-  }  
-
-  closeConnection(connection) {
-    try { connection.close(); } catch (error) {}
-  }
-  
+  isClientInChannel(client, channel) { return (client && client.connection && client.shared && client.channel && client.channel === channel); }
+  sendMessage(connection, message) { try { if (connection.readyState === 1) connection.send(message); } catch (error) {} }  
+  closeConnection(connection) { try { connection.close(); } catch (error) {} }
   async cleanupOldConnections() {
-    const seenThreshold = getTime() - this.config.seenTimeout;
-    const clientsToRemove = [];
-    for (const clientId in this.clients) {
-      if (this.clients[clientId].seen < seenThreshold) clientsToRemove.push(clientId);
-    }
-    for (const clientId of clientsToRemove) {
-      try {
-        this.clients[clientId].connection.close();
-        delete this.clients[clientId];
-      } catch (error) {}
-    }
-    return clientsToRemove.length;
+    const seenThreshold = getTime() - this.config.seenTimeout; const clientsToRemove = []; for (const clientId in this.clients) { if (this.clients[clientId].seen < seenThreshold) clientsToRemove.push(clientId); } for (const clientId of clientsToRemove) { try { this.clients[clientId].connection.close(); delete this.clients[clientId]; } catch (error) {} } return clientsToRemove.length;
   }
 }
