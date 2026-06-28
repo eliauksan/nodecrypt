@@ -4,7 +4,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // =================【第一步：截获并转发 WebSocket 请求】=================
+    // =================【第一步：无条件转发 WebSocket 请求】=================
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
       const id = env.CHAT_ROOM.idFromName('chat-room');
@@ -12,322 +12,144 @@ export default {
       return stub.fetch(request);
     }
 
-    // =================【第二步：权限精准判定（分清敌我）】=================
-    const cookieHeader = request.headers.get('Cookie') || '';
-    
-    // 🌟 判定是不是老板本人（以下满足任意一个条件即可，双重保险）：
-    // 1. URL 带着专属暗号：?create=kamiko
-    // 2. 浏览器有管理 Cookie
-    // 3. 🌟【新增保底】：哪怕不带暗号，只要你正在访问你自己特定的管理房间（假设是 4444，你可以把下面的 4444 改成你的常用固定房号）
-    const isBoss = url.searchParams.get('create') === 'kamiko' || 
-                   cookieHeader.includes('chat_auth=kamiko') || 
-                   url.searchParams.get('r') === '4444'; // 👈 这里你可以改成你自己常用的固定房间号
-
-    // =================【第三步：路由放行与篡改】=================
-    
-    // 1. 正常放行所有带房间参数的请求（保证普通人绝对能进房间聊天）
-    if (url.searchParams.has('r')) {
-      const response = await env.ASSETS.fetch(request);
-      return handleTextReplacement(response, isBoss);
-    }
-
-    // 2. 根目录首页拦截（只有你带暗号，或者带 Cookie 才能看首页）
-    if (url.pathname === '/') {
-      if (url.searchParams.get('create') === 'kamiko') {
-        const response = await env.ASSETS.fetch(request);
-        const replacedResponse = await handleTextReplacement(response, true);
-        const newResponse = new Response(replacedResponse.body, replacedResponse);
-        // 强制写入持久性通行证 Cookie
-        newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax');
-        return newResponse;
-      }
-
-      if (cookieHeader.includes('chat_auth=kamiko')) {
-        const response = await env.ASSETS.fetch(request);
-        return handleTextReplacement(response, true);
-      }
-
-      // 普通访客如果不带任何房号直接访问首页，403拒绝
-      return new Response('Access Denied: Please use a valid room link.', {
-        status: 403,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-      });
-    }
-
-    // =================【第四步：其余静态资产请求】=================
-    if (url.pathname.startsWith('/api/')) {
-      return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
-    }
-
+    // =================【第二步：无条件放行所有页面请求，杜绝白屏/黑屏】=================
     const response = await env.ASSETS.fetch(request);
     const contentType = response.headers.get('Content-Type') || '';
-    if (contentType.includes('text/html') || contentType.includes('application/javascript') || contentType.includes('text/javascript')) {
-      return handleTextReplacement(response, isBoss);
+
+    // 只有在返回 HTML 网页时，我们才去动态处理按钮的隐藏和显示
+    if (contentType.includes('text/html')) {
+      let text = await response.text();
+
+      // 1. 替换基础文本标签
+      text = text.replace(/NodeCrypt/g, '阅后即焚');
+      text = text.replace(/nodecrypt/g, '阅后即焚');
+      text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
+
+      // 2. 🎯 【核心暗号显形逻辑】：
+      // 默认情况下，给页面注入一段极其安全的 CSS，只要按钮或弹窗一露头，立刻隐形。
+      // 但是！如果检测到你访问的链接里带着 `admin=1` 这个专属暗号，就不隐藏它，让你能正常点到。
+      const showButton = url.searchParams.get('admin') === '1';
+
+      if (!showButton) {
+        // 普通人访问（不带 admin=1），注入极简的精准隐藏样式
+        const injectStyle = `
+          <style>
+            /* 精准隐藏左侧栏的 “进入新の房间” 按钮（根据文本和常见类名匹配） */
+            div:has(> span:contains("房间")), 
+            div:has(> button:contains("房间")), 
+            button:contains("房间"),
+            li:contains("房间"),
+            /* 隐藏点击之后可能弹出的中央模态框 */
+            div[class*="modal"], 
+            div[class*="dialog"] {
+              display: none !important;
+              opacity: 0 !important;
+              pointer-events: none !important;
+              visibility: hidden !important;
+            }
+          </style>
+          <script>
+            // 配合动态监听，普通人进来只要看到有这个按钮，直接物理移出，双重保险
+            (function() {
+              function clean() {
+                document.querySelectorAll('div, button, li, span').forEach(el => {
+                  if (el.textContent && (el.textContent.includes('进入新') || el.textContent.includes('新の房间'))) {
+                    if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]')) {
+                      try { el.remove(); } catch(e){}
+                    }
+                  }
+                });
+              }
+              clean();
+              new MutationObserver(clean).observe(document.body, { childList: true, subtree: true });
+            })();
+          </script>
+        `;
+        text = text.replace('</body>', `${injectStyle}</body>`);
+      }
+
+      const newHeaders = new Headers(response.headers);
+      newHeaders.delete('Content-Length');
+      return new Response(text, { status: response.status, headers: newHeaders });
     }
+
     return response;
   }
 };
 
-// 💡【核心动态文本与前端功能篡改函数】
-async function handleTextReplacement(response, isAdmin) {
-  if (!response.ok) return response;
-  
-  let text = await response.text();
-
-  // 1. 替换基础文本标签
-  text = text.replace(/NodeCrypt/g, '阅后即焚');
-  text = text.replace(/nodecrypt/g, '阅后即焚');
-  text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
-
-  // 2. 彻底清洗分享链接里的暗号（让别人复制出来的链接只有 ?r=xxx）
-  text = text.replace(/window\.location\.href/g, 'window.location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
-  text = text.replace(/location\.href/g, 'location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
-  text = text.replace(/window\.location\.search/g, 'window.location.search.replace("create=kamiko&", "").replace("create=kamiko", "")');
-
-  // 3. 🎯【核心重点】：只对普通访客斩草除根；如果是老板（isAdmin === true），这段脚本绝对不会注入！
-  if (!isAdmin) {
-    const killScriptInject = `
-      <script>
-        (function() {
-          function hideCreateRoomButton() {
-            const elements = document.querySelectorAll('div, button, a, span, li');
-            elements.forEach(el => {
-              if (el.textContent && (el.textContent.includes('房间') || el.textContent.includes('进入'))) {
-                // 如果在侧边栏、弹窗区域，或者含有“进入新”字样，直接彻底物理移除
-                if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('.modal') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]') || el.textContent.includes('进入新')) {
-                  el.style.setProperty('display', 'none', 'important');
-                  el.style.setProperty('visibility', 'hidden', 'important');
-                  el.style.setProperty('pointer-events', 'none', 'important');
-                  try { el.remove(); } catch(e){}
-                }
-              }
-            });
-          }
-          hideCreateRoomButton();
-          const observer = new MutationObserver(() => hideCreateRoomButton());
-          observer.observe(document.body, { childList: true, subtree: true });
-          setInterval(hideCreateRoomButton, 300);
-        })();
-      </script>
-      <style>
-        /* CSS 强制盲隐普通人的界面节点 */
-        [class*="sidebar"] div:has(svg) + div,
-        [class*="sidebar"] svg + div,
-        .sidebar-item,
-        button:contains("房间"),
-        div[class*="dialog"] {
-          display: none !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-      </style>
-    `;
-    text = text.replace('</body>', `${killScriptInject}</body>`);
-    
-    // 普通人进来的文本兜底清空
-    text = text.replace(/进入新的房间/g, '');
-    text = text.replace(/进入新の房间/g, '');
-  }
-
-  const newHeaders = new Headers(response.headers);
-  newHeaders.delete('Content-Length'); 
-
-  return new Response(text, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: newHeaders
-  });
-}
-
-// =================【Durable Object 房间核心中枢】=================
+// =================【Durable Object 房间核心中枢（保持原样，不做任何拦截伤害）】=================
 export class ChatRoom {  
   constructor(state, env) {
     this.state = state;
     this.clients = {};
     this.channels = {};
-    this.config = {
-      seenTimeout: 60000,
-      debug: false
-    };
+    this.config = { seenTimeout: 60000, debug: false };
     this.initRSAKeyPair();
   }
-
   async initRSAKeyPair() {
     try {
       let stored = await this.state.storage.get('rsaKeyPair');
       if (!stored) {
-        const keyPair = await crypto.subtle.generateKey(
-          {
-            name: 'RSASSA-PKCS1-v1_5',
-            modulusLength: 2048,
-            publicExponent: new Uint8Array([1, 0, 1]),
-            hash: 'SHA-256'
-          },
-          true,
-          ['sign', 'verify']
-        );
-
-        const [publicKeyBuffer, privateKeyBuffer] = await Promise.all([
-          crypto.subtle.exportKey('spki', keyPair.publicKey),
-          crypto.subtle.exportKey('pkcs8', keyPair.privateKey)
-        ]);
-        
-        stored = {
-          rsaPublic: btoa(String.fromCharCode(...new Uint8Array(publicKeyBuffer))),
-          rsaPrivateData: Array.from(new Uint8Array(privateKeyBuffer)),
-          createdAt: Date.now()
-        };
-        
+        const keyPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+        const [publicKeyBuffer, privateKeyBuffer] = await Promise.all([crypto.subtle.exportKey('spki', keyPair.publicKey), crypto.subtle.exportKey('pkcs8', keyPair.privateKey)]);
+        stored = { rsaPublic: btoa(String.fromCharCode(...new Uint8Array(publicKeyBuffer))), rsaPrivateData: Array.from(new Uint8Array(privateKeyBuffer)), createdAt: Date.now() };
         await this.state.storage.put('rsaKeyPair', stored);
       }
-      
       if (stored.rsaPrivateData) {
         const privateKeyBuffer = new Uint8Array(stored.rsaPrivateData);
-        stored.rsaPrivate = await crypto.subtle.importKey(
-          'pkcs8',
-          privateKeyBuffer,
-          {
-            name: 'RSASSA-PKCS1-v1_5',
-            hash: 'SHA-256'
-          },
-          false,
-          ['sign']
-        );      
+        stored.rsaPrivate = await crypto.subtle.importKey('pkcs8', privateKeyBuffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);      
       }
       this.keyPair = stored;
-    } catch (error) {
-      console.error('Error initializing RSA key pair:', error);
-    }
+    } catch (error) {}
   }
-
   async fetch(request) {
     const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-      return new Response('Expected WebSocket Upgrade', { status: 426 });
-    }
-
-    if (!this.keyPair) {
-      await this.initRSAKeyPair();
-    }
-
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') return new Response('Expected WebSocket Upgrade', { status: 426 });
+    if (!this.keyPair) await this.initRSAKeyPair();
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
-
     this.handleSession(server, request);
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+    return new Response(null, { status: 101, webSocket: client });
   }  
-
   async handleSession(connection, request) {    
     connection.accept();
     await this.cleanupOldConnections();
-
     const clientId = generateClientId();
-    if (!clientId || this.clients[clientId]) {
-      this.closeConnection(connection);
-      return;
-    }
-
-    const cookieHeader = request.headers.get('Cookie') || '';
-    const hasSecretToken = cookieHeader.includes('chat_auth=kamiko');
-
-    this.clients[clientId] = {
-      connection: connection,
-      seen: getTime(),
-      key: null,
-      shared: null,
-      channel: null,
-      isAuthorized: hasSecretToken 
-    };
-
-    try {
-      this.sendMessage(connection, JSON.stringify({
-        type: 'server-key',
-        key: this.keyPair.rsaPublic
-      }));
-    } catch (error) {}    
-
+    if (!clientId || this.clients[clientId]) { this.closeConnection(connection); return; }
+    this.clients[clientId] = { connection: connection, seen: getTime(), key: null, shared: null, channel: null };
+    try { this.sendMessage(connection, JSON.stringify({ type: 'server-key', key: this.keyPair.rsaPublic })); } catch (error) {}    
     connection.addEventListener('message', async (event) => {
       const message = event.data;
       if (!isString(message) || !this.clients[clientId]) return;
-
       this.clients[clientId].seen = getTime();
-
-      if (message === 'ping') {
-        this.sendMessage(connection, 'pong');
-        return;
-      }
-
+      if (message === 'ping') { this.sendMessage(connection, 'pong'); return; }
       if (!this.clients[clientId].shared && message.length < 2048) {
         try {
-          const keys = await crypto.subtle.generateKey(
-            { name: 'ECDH', namedCurve: 'P-384' },
-            true,
-            ['deriveBits', 'deriveKey']
-          );
-
+          const keys = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-384' }, true, ['deriveBits', 'deriveKey']);
           const publicKeyBuffer = await crypto.subtle.exportKey('raw', keys.publicKey);
-          const signature = await crypto.subtle.sign(
-            { name: 'RSASSA-PKCS1-v1_5' },
-            this.keyPair.rsaPrivate,
-            publicKeyBuffer
-          );
-
+          const signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, this.keyPair.rsaPrivate, publicKeyBuffer);
           const clientPublicKeyHex = message;
           const clientPublicKeyBytes = new Uint8Array(clientPublicKeyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
-          
-          const clientPublicKey = await crypto.subtle.importKey(
-            'raw',
-            clientPublicKeyBytes,
-            { name: 'ECDH', namedCurve: 'P-384' },
-            false,
-            []
-          );
-
-          const sharedSecretBits = await crypto.subtle.deriveBits(
-            { name: 'ECDH', public: clientPublicKey },
-            keys.privateKey,
-            384
-          );          
+          const clientPublicKey = await crypto.subtle.importKey('raw', clientPublicKeyBytes, { name: 'ECDH', namedCurve: 'P-384' }, false, []);
+          const sharedSecretBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: clientPublicKey }, keys.privateKey, 384);          
           this.clients[clientId].shared = new Uint8Array(sharedSecretBits).slice(8, 40);
-
-          const response = Array.from(new Uint8Array(publicKeyBuffer))
-            .map(b => b.toString(16).padStart(2, '0')).join('') + 
-            '|' + btoa(String.fromCharCode(...new Uint8Array(signature)));
-          
+          const response = Array.from(new Uint8Array(publicKeyBuffer)).map(b => b.toString(16).padStart(2, '0')).join('') + '|' + btoa(String.fromCharCode(...new Uint8Array(signature)));
           this.sendMessage(connection, response);
-
-        } catch (error) {
-          this.closeConnection(connection);
-        }
+        } catch (error) { this.closeConnection(connection); }
         return;
       }
-
-      if (this.clients[clientId].shared && message.length <= (8 * 1024 * 1024)) {
-        this.processEncryptedMessage(clientId, message);
-      }
+      if (this.clients[clientId].shared && message.length <= (8 * 1024 * 1024)) { this.processEncryptedMessage(clientId, message); }
     });    
-
     connection.addEventListener('close', async (event) => {
       const channel = this.clients[clientId].channel;
       if (channel && this.channels[channel]) {
         this.channels[channel].splice(this.channels[channel].indexOf(clientId), 1);
-        if (this.channels[channel].length === 0) {
-          delete(this.channels[channel]);
-        } else {
+        if (this.channels[channel].length === 0) { delete(this.channels[channel]); } else {
           try {
             const members = this.channels[channel];
             for (const member of members) {
               const client = this.clients[member];              
-              if (this.isClientInChannel(client, channel)) {
-                this.sendMessage(client.connection, encryptMessage({
-                  a: 'l',
-                  p: members.filter((value) => value !== member)
-                }, client.shared));
-              }
+              if (this.isClientInChannel(client, channel)) { this.sendMessage(client.connection, encryptMessage({ a: 'l', p: members.filter((value) => value !== member) }, client.shared)); }
             }
           } catch (error) {}
         }
@@ -335,44 +157,17 @@ export class ChatRoom {
       if (this.clients[clientId]) delete(this.clients[clientId]);
     });
   }
-
   processEncryptedMessage(clientId, message) {
     let decrypted = null;
     try {
       decrypted = decryptMessage(message, this.clients[clientId].shared);
       if (!isObject(decrypted) || !isString(decrypted.a)) return;
-
       const action = decrypted.a;
-
-      if (action === 'j') {
-        const targetChannel = decrypted.p;
-        const clientInfo = this.clients[clientId];
-
-        // 后端核心拦截逻辑：只有带暗号的老板可以创建房间，普通访客无法通过WebSocket新建房间
-        if (!clientInfo.isAuthorized) {
-          if (clientInfo.channel && clientInfo.channel !== targetChannel) {
-             this.closeConnection(clientInfo.connection);
-             return;
-          }
-          if (!this.channels[targetChannel]) {
-             this.closeConnection(clientInfo.connection);
-             return;
-          }
-        }
-        
-        this.handleJoinChannel(clientId, decrypted);
-      } else if (action === 'c') {
-        this.handleClientMessage(clientId, decrypted);
-      } else if (action === 'w') {
-        this.handleChannelMessage(clientId, decrypted);
-      }
-    } catch (error) {
-    } finally {
-      decrypted = null;
-    }
+      if (action === 'j') { this.handleJoinChannel(clientId, decrypted); } 
+      else if (action === 'c') { this.handleClientMessage(clientId, decrypted); } 
+      else if (action === 'w') { this.handleChannelMessage(clientId, decrypted); }
+    } catch (error) {} finally { decrypted = null; }
   }
-
-  // ... (下方的核心中枢方法保持不变)
   handleJoinChannel(clientId, decrypted) {
     if (!isString(decrypted.p) || this.clients[clientId].channel) return;
     try { const channel = decrypted.p; this.clients[clientId].channel = channel; if (!this.channels[channel]) { this.channels[channel] = [clientId]; } else { this.channels[channel].push(clientId); } this.broadcastMemberList(channel); } catch (error) {}
