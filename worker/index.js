@@ -20,31 +20,40 @@ export default {
       return env.ASSETS.fetch(request); 
     }
 
-    // =================【第二步：精准拦截首页根目录（看门人守卫逻辑）】=================
-    if (url.pathname === '/') {
-      const cookieHeader = request.headers.get('Cookie') || '';
-      
-      // 检查 A：URL 后面带着固定暗号 
-      if (url.searchParams.get('create') === 'kid') {
-        // 从底层的 ASSETS 中抓取首页 HTML 内容（拒绝使用全局 fetch 避免死循环）
-        const response = await env.ASSETS.fetch(request);
-        const newResponse = new Response(response.body, response);
-        // 埋下 1 小时有效的通行证 Cookie 
-        newResponse.headers.append('Set-Cookie', 'chat_auth=kid; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
-        return newResponse;
-      }
+    // =================【第二步：精准路径拦截（看门人守卫逻辑）】=================
 
-      // 检查 B：浏览器里已经有通行证（Cookie）了，直接放行首页
-      if (cookieHeader.includes('chat_auth=kid')) {
-        return env.ASSETS.fetch(request);
-      }
+const cookieHeader = request.headers.get('Cookie') || '';
+const hasCookie = cookieHeader.includes('chat_auth=kamiko');
 
-      // 检查 C：既没有暗号也没有 Cookie，直接拦截返回 403
-      return new Response('Access Denied: Please use the correct creation link.（咋地，访问这个干嘛？你想干嘛？我在问你，你要干什么？）', {
-        status: 403,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-      });
-    }
+// 1. 检查 A：用户访问的是不是你专属的暗号路径（例如：/kamiko）
+if (url.pathname === '/kid') {
+  // 从底层抓取首页内容返回（或者你也可以用 URL 重定向到 '/'，但这里保持直接返回内容）
+  const response = await env.ASSETS.fetch(request);
+  const newResponse = new Response(response.body, response);
+  
+  // 种下 1 小时有效的通行证 Cookie
+  newResponse.headers.append('Set-Cookie', 'chat_auth=kid; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
+  return newResponse;
+}
+
+// 2. 静态资源放行白名单（确保 JS/CSS/图片/字体 等正常加载，否则页面会白屏）
+// 规则：路径里包含 '.'（如 main.js, style.css）或者属于特殊资源目录
+const isStaticAsset = url.pathname.includes('.') || url.pathname.startsWith('/_next/') || url.pathname.startsWith('/assets/');
+
+if (isStaticAsset) {
+  return env.ASSETS.fetch(request);
+}
+
+// 3. 检查 B：访问其他路径（比如 / , /wang 等），必须持有有效的通行证 Cookie
+if (hasCookie) {
+  return env.ASSETS.fetch(request);
+}
+
+// 4. 检查 C：既不是暗号路径，又没有 Cookie，也不是静态资源 —— 统统拦截！
+return new Response('Access Denied: Please use the correct entry path.', {
+  status: 403,
+  headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+});
 
     // =================【第三步：处理其余 API 和静态资产请求】=================
     // 处理 API 请求
