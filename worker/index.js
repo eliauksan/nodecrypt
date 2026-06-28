@@ -4,9 +4,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // =================【核心修复：优先截获并转发 WebSocket 请求】=================
-    // 无论是创建房间还是在房间内聊天，前端发起的 WS 长连接必须直接送往 Durable Object 房间处理器
-    // 否则建房或加入房间会永远卡在 “连接中...”
+    // =================【第一步：截获并转发 WebSocket 请求】=================
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
       const id = env.CHAT_ROOM.idFromName('chat-room');
@@ -14,29 +12,32 @@ export default {
       return stub.fetch(request);
     }
 
-    // =================【第一步：无条件放行带房间参数的网页内容请求】=================
-    // 如果是加入房间的链接（含有 r= 参数）的网页托管资源请求，直接从 ASSETS 资源库提取并放行
+    // =================【第二步：无条件放行带房间参数的网页内容请求】=================
     if (url.searchParams.has('r')) {
-      return env.ASSETS.fetch(request); 
+      // 这里的资源也需要经过文本替换，防止直接进房间链接时没换掉字
+      const response = await env.ASSETS.fetch(request);
+      return handleTextReplacement(response);
     }
 
-    // =================【第二步：精准拦截首页根目录（看门人守卫逻辑）】=================
+    // =================【第三步：精准拦截首页根目录（看门人守卫逻辑）】=================
     if (url.pathname === '/') {
       const cookieHeader = request.headers.get('Cookie') || '';
       
       // 检查 A：URL 后面带着固定暗号 kamiko
       if (url.searchParams.get('create') === 'kamiko') {
-        // 从底层的 ASSETS 中抓取首页 HTML 内容（拒绝使用全局 fetch 避免死循环）
         const response = await env.ASSETS.fetch(request);
-        const newResponse = new Response(response.body, response);
-        // 埋下 1 小时有效的通行证 Cookie 
+        // 执行文本替换
+        const replacedResponse = await handleTextReplacement(response);
+        const newResponse = new Response(replacedResponse.body, replacedResponse);
+        // 埋下通行证
         newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
       // 检查 B：浏览器里已经有通行证（Cookie）了，直接放行首页
       if (cookieHeader.includes('chat_auth=kamiko')) {
-        return env.ASSETS.fetch(request);
+        const response = await env.ASSETS.fetch(request);
+        return handleTextReplacement(response);
       }
 
       // 检查 C：既没有暗号也没有 Cookie，直接拦截返回 403
@@ -46,16 +47,47 @@ export default {
       });
     }
 
-    // =================【第三步：处理其余 API 和静态资产请求】=================
-    // 处理 API 请求
+    // =================【第四步：处理其余 API 和静态资产请求】=================
     if (url.pathname.startsWith('/api/')) {
       return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
     }
 
-    // 其余的所有 JS/CSS/图片/ SPA 资源请求，安全交给 ASSETS 资源器下发给浏览器
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    // 只对 HTML 和 JS 静态文件做可能的文本替换
+    const contentType = response.headers.get('Content-Type') || '';
+    if (contentType.includes('text/html') || contentType.includes('application/javascript') || contentType.includes('text/javascript')) {
+      return handleTextReplacement(response);
+    }
+    return response;
   }
 };
+
+// 💡【核心动态文本替换函数】
+async function handleTextReplacement(response) {
+  if (!response.ok) return response;
+  
+  let text = await response.text();
+
+  // 1. 替换网页顶部或标签页标题中的 NodeCrypt 为 阅后即焚
+  text = text.replace(/NodeCrypt/g, '阅后即焚');
+  text = text.replace(/nodecrypt/g, '阅后即焚');
+
+  // 2. 替换页脚的 Powered by 阅后即焚 (刚才上一步已经把NodeCrypt换成阅后即焚了，所以这里匹配 阅后即焚)
+  // 如果前端写的是 Powered by NodeCrypt，会被转换为 Powered by 阅后即焚
+
+  // 3. 将末尾的 @shuaieplus 更改为 爆改自@shuaieplus
+  text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
+
+  // 重新构建响应返回给浏览器
+  const newHeaders = new Headers(response.headers);
+  newHeaders.delete('Content-Length'); // 文本长度变了，必须删掉让 Cloudflare 重新计算
+
+  return new Response(text, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders
+  });
+}
 
 // =================【以下为您原本完整的 ChatRoom Durable Object 逻辑，完好无损】=================
 export class ChatRoom {  
@@ -133,6 +165,11 @@ export class ChatRoom {
   }
 
   async fetch(request) {
+    const cookieHeader = request.headers.get('Cookie') || '';
+    const url = new URL(request.url);
+    
+    const isAuthorized = cookieHeader.includes('chat_auth=kamiko') || url.searchParams.get('create') === 'kamiko';
+    
     const upgradeHeader = request.headers.get('Upgrade');
     if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
       return new Response('Expected WebSocket Upgrade', { status: 426 });
@@ -145,7 +182,7 @@ export class ChatRoom {
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
 
-    this.handleSession(server);
+    this.handleSession(server, isAuthorized);
 
     return new Response(null, {
       status: 101,
@@ -153,7 +190,7 @@ export class ChatRoom {
     });
   }  
 
-  async handleSession(connection) {    
+  async handleSession(connection, isAuthorized) {    
     connection.accept();
     await this.cleanupOldConnections();
 
@@ -170,7 +207,8 @@ export class ChatRoom {
       seen: getTime(),
       key: null,
       shared: null,
-      channel: null
+      channel: null,
+      isAuthorized: isAuthorized
     };
 
     try {
@@ -201,10 +239,7 @@ export class ChatRoom {
       if (!this.clients[clientId].shared && message.length < 2048) {
         try {
           const keys = await crypto.subtle.generateKey(
-            {
-              name: 'ECDH',
-              namedCurve: 'P-384'
-            },
+            { name: 'ECDH', namedCurve: 'P-384' },
             true,
             ['deriveBits', 'deriveKey']
           );
@@ -212,9 +247,7 @@ export class ChatRoom {
           const publicKeyBuffer = await crypto.subtle.exportKey('raw', keys.publicKey);
           
           const signature = await crypto.subtle.sign(
-            {
-              name: 'RSASSA-PKCS1-v1_5'
-            },
+            { name: 'RSASSA-PKCS1-v1_5' },
             this.keyPair.rsaPrivate,
             publicKeyBuffer
           );
@@ -231,10 +264,7 @@ export class ChatRoom {
           );
 
           const sharedSecretBits = await crypto.subtle.deriveBits(
-            {
-              name: 'ECDH',
-              public: clientPublicKey
-            },
+            { name: 'ECDH', public: clientPublicKey },
             keys.privateKey,
             384
           );          
@@ -312,6 +342,11 @@ export class ChatRoom {
       const action = decrypted.a;
 
       if (action === 'j') {
+        if (!this.clients[clientId].isAuthorized) {
+          console.log(`已拦截未授权的用户 ${clientId} 尝试创建/进入新房`);
+          this.closeConnection(this.clients[clientId].connection);
+          return;
+        }
         this.handleJoinChannel(clientId, decrypted);
       } else if (action === 'c') {
         this.handleClientMessage(clientId, decrypted);
