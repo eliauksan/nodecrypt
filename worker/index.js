@@ -40,7 +40,7 @@ export default {
       }
 
       // 检查 C：既没有暗号也没有 Cookie，直接拦截返回 403
-      return new Response('Access Denied: Please use the correct creation link.', {
+      return new Response('Access Denied: Please use the correct creation link.（咋地，访问这个干嘛？你想干嘛？我在问你，你要干什么？）', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       });
