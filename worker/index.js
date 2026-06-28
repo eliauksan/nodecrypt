@@ -12,42 +12,41 @@ export default {
       return stub.fetch(request);
     }
 
-    // =================【第二步：带房间参数的请求（即已经在聊天窗口内），执行强力拦截替换】=================
+    // =================【第二步：无条件放行带房间参数的网页内容请求】=================
+    // 无论是访问 /?r=xxx 还是旧的格式，只要有房间号 r 就放行网页，但不对其下发管理权限
     if (url.searchParams.has('r')) {
       const response = await env.ASSETS.fetch(request);
-      return handleTextReplacement(response, true); // 传入 true，代表在房间内，开启拦截
+      return handleTextReplacement(response, false); 
     }
 
     // =================【第三步：精准拦截首页根目录（看门人守卫逻辑）】=================
     if (url.pathname === '/') {
       const cookieHeader = request.headers.get('Cookie') || '';
       
-      // 检查 A：URL 后面带着固定暗号 kamiko
+      // 检查 A：URL 后面带着固定暗号 kamiko (只有你通过这个链接进入，才能作为管理员创建房间)
       if (url.searchParams.get('create') === 'kamiko') {
         const response = await env.ASSETS.fetch(request);
-        // 首页不需要拦截弹窗，传入 false
-        const replacedResponse = await handleTextReplacement(response, false);
+        const replacedResponse = await handleTextReplacement(response, true); // true 代表是管理员
         const newResponse = new Response(replacedResponse.body, replacedResponse);
-        // 埋下通行证
+        // 埋下高级通行证
         newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
-      // 检查 B：浏览器里已经有通行证（Cookie）了，放行首页
+      // 检查 B：浏览器里已经有通行证（Cookie）了
       if (cookieHeader.includes('chat_auth=kamiko')) {
         const response = await env.ASSETS.fetch(request);
-        // 既然已经是通行首页，说明是登录前的主界面，不需要拦截内部弹窗，传入 false
-        return handleTextReplacement(response, false);
+        return handleTextReplacement(response, true);
       }
 
-      // 检查 C：既没有暗号也没有 Cookie，直接拦截返回 403
+      // 检查 C：普通访客直接拦截（无暗号无Cookie不给看首页）
       return new Response('Access Denied: Please use the correct creation link.', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       });
     }
 
-    // =================【第四步：处理其余静态资产和 API 请求】=================
+    // =================【第四步：处理其余 API 和静态资产请求】=================
     if (url.pathname.startsWith('/api/')) {
       return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
     }
@@ -55,64 +54,64 @@ export default {
     const response = await env.ASSETS.fetch(request);
     const contentType = response.headers.get('Content-Type') || '';
     if (contentType.includes('text/html') || contentType.includes('application/javascript') || contentType.includes('text/javascript')) {
-      // 只有明确在聊天房间相关的 JS 或页面中才根据状态拦截，通常静态资源文件统一处理
       return handleTextReplacement(response, false);
     }
     return response;
   }
 };
 
-// 💡【核心动态文本替换与定向拦截注入函数】
-async function handleTextReplacement(response, shouldBlockInside) {
+// 💡【核心动态文本与前端功能篡改函数】
+async function handleTextReplacement(response, isAdmin) {
   if (!response.ok) return response;
   
   let text = await response.text();
 
-  // 1. 全局基础文本替换
+  // 1. 替换基础文本标签
   text = text.replace(/NodeCrypt/g, '阅后即焚');
   text = text.replace(/nodecrypt/g, '阅后即焚');
   text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
 
-  // 2. 只有当明确处于房间内部（URL 带有 r 参数等触发 shouldBlockInside = true）时，才激活拦截代码
-  if (shouldBlockInside) {
-    const injection = `
+  // 2. 🌟【新增核心逻辑：彻底切除分享链接里的暗号】🌟
+  // 前端通常使用 window.location.href 或 window.location.search 来拼接分享链接
+  // 我们通过暴力替换前端获取当前 URL 核心参数的 JS 逻辑，强行过滤掉 "create=kamiko"
+  text = text.replace(/window\.location\.href/g, 'window.location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
+  text = text.replace(/location\.href/g, 'location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
+  text = text.replace(/window\.location\.search/g, 'window.location.search.replace("create=kamiko&", "").replace("create=kamiko", "")');
+
+  // 3. 核心大招：如果【不是管理员】，直接用 CSS 物理抹除该按钮和弹窗
+  if (!isAdmin) {
+    const cssHideInject = `
       <style>
-        /* 精准打击：只在侧边栏显示、且已经处于房间状态时，隐形掉那个“进入新房间”的菜单项 */
-        div[class*="sidebar"] div:has(> svg):has(span),
-        div[class*="sidebar"] div:contains("进入"),
-        div[class*="menu"] div:contains("进入") {
+        /* 强行隐藏左上角的 “进入新の房间” 侧边栏按钮 */
+        div:has(> svg) + div:contains("房间"), 
+        button:contains("房间"), 
+        a:contains("房间"),
+        .sidebar-item:contains("房间"),
+        div[class*="sidebar"]:contains("房间") {
+          display: none !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+        }
+
+        /* 强行隐藏已经弹出的对话框中心区域 */
+        div:has(> h3:contains("房间")), 
+        div:has(> div:contains("进入新")),
+        .modal:contains("房间"),
+        div[class*="dialog"]:contains("房间") {
           display: none !important;
           opacity: 0 !important;
           pointer-events: none !important;
         }
       </style>
-      <script>
-        // 定时守护脚本：如果用户在聊天室内部通过骚操作触发了本地路由弹窗
-        // 只要当前链接里有 '?r=' 或 '#/room'，脚本就会自动把这个弹窗给无情移除
-        setInterval(() => {
-          if (window.location.search.includes('r=') || window.location.hash.includes('room')) {
-            const elements = document.querySelectorAll('div, h2, h3, p');
-            elements.forEach(el => {
-              if (el.textContent && (el.textContent.includes('进入新') || el.textContent.includes('专属私密'))) {
-                // 顺着它往上找最外层的弹窗遮罩盒子
-                const modalBox = el.closest('div[class*="modal"], div[class*="dialog"], div[style*="position: fixed"]');
-                if (modalBox) {
-                  console.log('检测到室内违规弹窗，已自动粉碎。');
-                  modalBox.remove(); 
-                }
-              }
-            });
-          }
-        }, 50);
-      </script>
     `;
-
-    // 将拦截代码注入 HTML
-    if (text.includes('</head>')) {
-      text = text.replace('</head>', `${injection}</head>`);
-    } else if (text.includes('<body>')) {
-      text = text.replace('<body>', `<body>${injection}`);
-    }
+    text = text.replace('</head>', `${cssHideInject}</head>`);
+    
+    // 文本双重兜底替换
+    text = text.replace(/进入新的房间/g, '通道已永久锁死');
+    text = text.replace(/进入新の房间/g, '通道已永久锁死');
+    text = text.replace(/用户名/g, '无权限');
+    text = text.replace(/房间名称/g, '无权限');
+    text = text.replace(/确定/g, '越权无效');
   }
 
   const newHeaders = new Headers(response.headers);
@@ -163,6 +162,7 @@ export class ChatRoom {
           rsaPrivateData: Array.from(new Uint8Array(privateKeyBuffer)),
           createdAt: Date.now()
         };
+        
         await this.state.storage.put('rsaKeyPair', stored);
       }
       
@@ -198,7 +198,7 @@ export class ChatRoom {
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
 
-    this.handleSession(server);
+    this.handleSession(server, request);
 
     return new Response(null, {
       status: 101,
@@ -206,7 +206,7 @@ export class ChatRoom {
     });
   }  
 
-  async handleSession(connection) {    
+  async handleSession(connection, request) {    
     connection.accept();
     await this.cleanupOldConnections();
 
@@ -216,12 +216,16 @@ export class ChatRoom {
       return;
     }
 
+    const cookieHeader = request.headers.get('Cookie') || '';
+    const hasSecretToken = cookieHeader.includes('chat_auth=kamiko');
+
     this.clients[clientId] = {
       connection: connection,
       seen: getTime(),
       key: null,
       shared: null,
-      channel: null
+      channel: null,
+      isAuthorized: hasSecretToken 
     };
 
     try {
@@ -327,11 +331,21 @@ export class ChatRoom {
 
       if (action === 'j') {
         const targetChannel = decrypted.p;
-        // 如果当前客户端已经在一个活跃房间通道中，直接丢弃跨房/切房的 WebSocket 命令
-        if (this.clients[clientId].channel && this.clients[clientId].channel !== targetChannel) {
-           console.log(`拒绝用户 ${clientId} 室内窜房到: ${targetChannel}`);
-           return;
+        const clientInfo = this.clients[clientId];
+
+        if (!clientInfo.isAuthorized) {
+          if (clientInfo.channel && clientInfo.channel !== targetChannel) {
+             console.log(`[安全拦截] 拦截非法窜房: ${targetChannel}`);
+             this.closeConnection(clientInfo.connection);
+             return;
+          }
+          if (!this.channels[targetChannel]) {
+             console.log(`[安全拦截] 拒绝无暗号用户创建新房间: ${targetChannel}`);
+             this.closeConnection(clientInfo.connection);
+             return;
+          }
         }
+        
         this.handleJoinChannel(clientId, decrypted);
       } else if (action === 'c') {
         this.handleClientMessage(clientId, decrypted);
