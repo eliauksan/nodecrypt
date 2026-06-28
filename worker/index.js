@@ -12,33 +12,40 @@ export default {
       return stub.fetch(request);
     }
 
-    // =================【第二步：无条件放行带房间参数的网页内容请求】=================
+    // =================【第二步：核心逻辑：根据是否有暗号/通行证决定权限】=================
+    const cookieHeader = request.headers.get('Cookie') || '';
+    
+    // 条件 A：带了管理暗号，或者是已经持有暗号通行证的老板
+    const isBoss = url.searchParams.get('create') === 'kamiko' || cookieHeader.includes('chat_auth=kamiko');
+
+    // =================【第三步：路由分发与安全放行】=================
+    
+    // 1. 如果是带了房间号参数（?r=xxx）的分享链接，属于正常聊天访客，必须无条件放行网页！
     if (url.searchParams.has('r')) {
       const response = await env.ASSETS.fetch(request);
-      return handleTextReplacement(response, false); 
+      // 如果不是老板，就去前端把建新房的按钮彻底挖掉，但保留本房间的聊天功能
+      return handleTextReplacement(response, isBoss);
     }
 
-    // =================【第三步：精准拦截首页根目录（看门人守卫逻辑）】=================
+    // 2. 如果是访问纯根目录首页（/），则需要看门人守卫
     if (url.pathname === '/') {
-      const cookieHeader = request.headers.get('Cookie') || '';
-      
-      // 检查 A：URL 后面带着固定暗号 kamiko (只有你通过这个链接进入，才能作为管理员创建房间)
+      // 如果带了新暗号进来，顺便给他种个通行证 Cookie 方便后续访问
       if (url.searchParams.get('create') === 'kamiko') {
         const response = await env.ASSETS.fetch(request);
-        const replacedResponse = await handleTextReplacement(response, true); 
+        const replacedResponse = await handleTextReplacement(response, true);
         const newResponse = new Response(replacedResponse.body, replacedResponse);
         newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
 
-      // 检查 B：浏览器里已经有通行证（Cookie）了
+      // 如果浏览器本来就存了通行证，直接放行完整后台
       if (cookieHeader.includes('chat_auth=kamiko')) {
         const response = await env.ASSETS.fetch(request);
         return handleTextReplacement(response, true);
       }
 
-      // 检查 C：普通访客直接拦截
-      return new Response('Access Denied: Please use the correct creation link.', {
+      // 普通网民如果不带房间号、又没暗号想直接闯入首页建新房：无情拦截
+      return new Response('Access Denied: Please use a valid room link.', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       });
@@ -52,7 +59,7 @@ export default {
     const response = await env.ASSETS.fetch(request);
     const contentType = response.headers.get('Content-Type') || '';
     if (contentType.includes('text/html') || contentType.includes('application/javascript') || contentType.includes('text/javascript')) {
-      return handleTextReplacement(response, false);
+      return handleTextReplacement(response, isBoss);
     }
     return response;
   }
@@ -69,66 +76,58 @@ async function handleTextReplacement(response, isAdmin) {
   text = text.replace(/nodecrypt/g, '阅后即焚');
   text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
 
-  // 2. 切除分享链接里的暗号
+  // 2. 彻底切除分享链接里的暗号（确保点击分享生成的链接只有 ?r=房间号）
   text = text.replace(/window\.location\.href/g, 'window.location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/location\.href/g, 'location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/window\.location\.search/g, 'window.location.search.replace("create=kamiko&", "").replace("create=kamiko", "")');
 
-  // 3. 核心大招：如果【不是管理员】，注入高频强力自动化清洗脚本
+  // 3. 🎯【核心重点】：如果【不是管理员】，注入高性能 DOM 看门狗，让建新房的入口从物理上消失
   if (!isAdmin) {
     const killScriptInject = `
       <script>
         (function() {
-          function purgeTargetElements() {
-            // 扫描整个网页中所有包含"房间"或"进入"的 DOM 节点
-            const elements = document.querySelectorAll('div, button, a, span, p, h3');
+          function hideCreateRoomButton() {
+            // 通过查找包含“房间”或“进入”字样的节点，并进行精准定向排除
+            const elements = document.querySelectorAll('div, button, a, span, li');
             elements.forEach(el => {
               if (el.textContent && (el.textContent.includes('房间') || el.textContent.includes('进入'))) {
-                // 如果是侧边栏的“进入新の房间”按钮项，或者弹窗的“进入新の房间”标题
-                // 顺着节点往上找，把整个容器直接彻底干掉
-                if (el.tagName === 'DIV' || el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'H3') {
-                  // 精准屏蔽：避免误删聊天内容，重点删除左侧菜单和模态弹窗
-                  if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('.modal') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]') || el.textContent.includes('进入新')) {
-                    el.style.setProperty('display', 'none', 'important');
-                    el.remove(); // 直接从内存和HTML中彻底物理删除该节点
-                  }
+                // 如果这个节点长在侧边栏里，或者它本身就是弹窗组件、对话框组件
+                if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('.modal') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]') || el.textContent.includes('进入新')) {
+                  el.style.setProperty('display', 'none', 'important');
+                  el.style.setProperty('visibility', 'hidden', 'important');
+                  el.style.setProperty('pointer-events', 'none', 'important');
+                  // 直接从 DOM 树种连根移除，确保无法被点击
+                  try { el.remove(); } catch(e){}
                 }
               }
             });
           }
 
-          // 1. 立即执行一次
-          purgeTargetElements();
-
-          // 2. 使用动态监听器（MutationObserver），防止单页应用（SPA）在路由切换或弹窗弹出时重新生成该按钮
-          const observer = new MutationObserver((mutations) => {
-            purgeTargetElements();
-          });
-
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true
-          });
-
-          // 3. 定时器双重死锁保险
-          setInterval(purgeTargetElements, 300);
+          // 开启高速渲染监听，一露头就秒杀
+          hideCreateRoomButton();
+          const observer = new MutationObserver(() => hideCreateRoomButton());
+          observer.observe(document.body, { childList: true, subtree: true });
+          setInterval(hideCreateRoomButton, 300);
         })();
       </script>
       <style>
-        /* 暴力黑洞：万一JS慢了0.01秒，用全局最野蛮的选择器先隐藏可能出现的文本容器 */
-        div:has(span:contains("房间")), div:has(button:contains("房间")), button:contains("房间") {
+        /* 暴力兜底样式：只要侧边栏包含任何可能是“进入”按钮的结构，直接盲隐 */
+        [class*="sidebar"] div:has(svg) + div,
+        [class*="sidebar"] svg + div,
+        .sidebar-item,
+        button:contains("房间"),
+        div[class*="dialog"] {
           display: none !important;
           opacity: 0 !important;
-          visibility: hidden !important;
           pointer-events: none !important;
         }
       </style>
     `;
     
-    // 把这套物理清除脚本和样式注入到 </body> 标签之前，确保在页面加载和渲染的每一个生命周期都在强制执行
+    // 把清除脚本注入到前端 HTML 闭合标签之前
     text = text.replace('</body>', `${killScriptInject}</body>`);
     
-    // 文本字面量硬替换
+    // 文本硬替换
     text = text.replace(/进入新的房间/g, '');
     text = text.replace(/进入新の房间/g, '');
   }
@@ -352,14 +351,13 @@ export class ChatRoom {
         const targetChannel = decrypted.p;
         const clientInfo = this.clients[clientId];
 
+        // 后端保底安全限制：普通用户如果试图创建不存在的新房间，直接阻断
         if (!clientInfo.isAuthorized) {
           if (clientInfo.channel && clientInfo.channel !== targetChannel) {
-             console.log(`[安全拦截] 拦截非法窜房: ${targetChannel}`);
              this.closeConnection(clientInfo.connection);
              return;
           }
           if (!this.channels[targetChannel]) {
-             console.log(`[安全拦截] 拒绝无暗号用户创建新房间: ${targetChannel}`);
              this.closeConnection(clientInfo.connection);
              return;
           }
