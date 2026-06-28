@@ -13,7 +13,6 @@ export default {
     }
 
     // =================【第二步：无条件放行带房间参数的网页内容请求】=================
-    // 无论是访问 /?r=xxx 还是旧的格式，只要有房间号 r 就放行网页，但不对其下发管理权限
     if (url.searchParams.has('r')) {
       const response = await env.ASSETS.fetch(request);
       return handleTextReplacement(response, false); 
@@ -26,9 +25,8 @@ export default {
       // 检查 A：URL 后面带着固定暗号 kamiko (只有你通过这个链接进入，才能作为管理员创建房间)
       if (url.searchParams.get('create') === 'kamiko') {
         const response = await env.ASSETS.fetch(request);
-        const replacedResponse = await handleTextReplacement(response, true); // true 代表是管理员
+        const replacedResponse = await handleTextReplacement(response, true); 
         const newResponse = new Response(replacedResponse.body, replacedResponse);
-        // 埋下高级通行证
         newResponse.headers.append('Set-Cookie', 'chat_auth=kamiko; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax');
         return newResponse;
       }
@@ -39,7 +37,7 @@ export default {
         return handleTextReplacement(response, true);
       }
 
-      // 检查 C：普通访客直接拦截（无暗号无Cookie不给看首页）
+      // 检查 C：普通访客直接拦截
       return new Response('Access Denied: Please use the correct creation link.', {
         status: 403,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' }
@@ -71,47 +69,68 @@ async function handleTextReplacement(response, isAdmin) {
   text = text.replace(/nodecrypt/g, '阅后即焚');
   text = text.replace(/@shuaieplus/g, '爆改自@shuaieplus');
 
-  // 2. 🌟【新增核心逻辑：彻底切除分享链接里的暗号】🌟
-  // 前端通常使用 window.location.href 或 window.location.search 来拼接分享链接
-  // 我们通过暴力替换前端获取当前 URL 核心参数的 JS 逻辑，强行过滤掉 "create=kamiko"
+  // 2. 切除分享链接里的暗号
   text = text.replace(/window\.location\.href/g, 'window.location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/location\.href/g, 'location.href.replace("create=kamiko&", "").replace("create=kamiko", "")');
   text = text.replace(/window\.location\.search/g, 'window.location.search.replace("create=kamiko&", "").replace("create=kamiko", "")');
 
-  // 3. 核心大招：如果【不是管理员】，直接用 CSS 物理抹除该按钮和弹窗
+  // 3. 核心大招：如果【不是管理员】，注入高频强力自动化清洗脚本
   if (!isAdmin) {
-    const cssHideInject = `
-      <style>
-        /* 强行隐藏左上角的 “进入新の房间” 侧边栏按钮 */
-        div:has(> svg) + div:contains("房间"), 
-        button:contains("房间"), 
-        a:contains("房间"),
-        .sidebar-item:contains("房间"),
-        div[class*="sidebar"]:contains("房间") {
-          display: none !important;
-          visibility: hidden !important;
-          pointer-events: none !important;
-        }
+    const killScriptInject = `
+      <script>
+        (function() {
+          function purgeTargetElements() {
+            // 扫描整个网页中所有包含"房间"或"进入"的 DOM 节点
+            const elements = document.querySelectorAll('div, button, a, span, p, h3');
+            elements.forEach(el => {
+              if (el.textContent && (el.textContent.includes('房间') || el.textContent.includes('进入'))) {
+                // 如果是侧边栏的“进入新の房间”按钮项，或者弹窗的“进入新の房间”标题
+                // 顺着节点往上找，把整个容器直接彻底干掉
+                if (el.tagName === 'DIV' || el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'H3') {
+                  // 精准屏蔽：避免误删聊天内容，重点删除左侧菜单和模态弹窗
+                  if (el.closest('.sidebar') || el.closest('[class*="sidebar"]') || el.closest('.modal') || el.closest('[class*="modal"]') || el.closest('[class*="dialog"]') || el.textContent.includes('进入新')) {
+                    el.style.setProperty('display', 'none', 'important');
+                    el.remove(); // 直接从内存和HTML中彻底物理删除该节点
+                  }
+                }
+              }
+            });
+          }
 
-        /* 强行隐藏已经弹出的对话框中心区域 */
-        div:has(> h3:contains("房间")), 
-        div:has(> div:contains("进入新")),
-        .modal:contains("房间"),
-        div[class*="dialog"]:contains("房间") {
+          // 1. 立即执行一次
+          purgeTargetElements();
+
+          // 2. 使用动态监听器（MutationObserver），防止单页应用（SPA）在路由切换或弹窗弹出时重新生成该按钮
+          const observer = new MutationObserver((mutations) => {
+            purgeTargetElements();
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+
+          // 3. 定时器双重死锁保险
+          setInterval(purgeTargetElements, 300);
+        })();
+      </script>
+      <style>
+        /* 暴力黑洞：万一JS慢了0.01秒，用全局最野蛮的选择器先隐藏可能出现的文本容器 */
+        div:has(span:contains("房间")), div:has(button:contains("房间")), button:contains("房间") {
           display: none !important;
           opacity: 0 !important;
+          visibility: hidden !important;
           pointer-events: none !important;
         }
       </style>
     `;
-    text = text.replace('</head>', `${cssHideInject}</head>`);
     
-    // 文本双重兜底替换
-    text = text.replace(/进入新的房间/g, '通道已永久锁死');
-    text = text.replace(/进入新の房间/g, '通道已永久锁死');
-    text = text.replace(/用户名/g, '无权限');
-    text = text.replace(/房间名称/g, '无权限');
-    text = text.replace(/确定/g, '越权无效');
+    // 把这套物理清除脚本和样式注入到 </body> 标签之前，确保在页面加载和渲染的每一个生命周期都在强制执行
+    text = text.replace('</body>', `${killScriptInject}</body>`);
+    
+    // 文本字面量硬替换
+    text = text.replace(/进入新的房间/g, '');
+    text = text.replace(/进入新の房间/g, '');
   }
 
   const newHeaders = new Headers(response.headers);
